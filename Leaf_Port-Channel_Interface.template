@@ -1,0 +1,380 @@
+##template properties
+name =Leaf_Port-Channel_Interface;
+description = Test-Portchannel;
+tags =interface_edit;
+userDefined = true;
+supportedPlatforms = All;
+templateType = POLICY;
+templateSubType = INTERFACE_PORT_CHANNEL;
+contentType = PYTHON;
+implements = ;
+dependencies = ;
+published = false;
+imports = ;
+##
+##template variables
+
+#    Copyright (c) 2019-2020 by Cisco Systems, Inc.
+#    All rights reserved.
+
+@(IsInternal=true)
+string SERIAL_NUMBER;
+
+@(PrimaryAssociation=true, IsInternal=true)
+string PO_ID;
+
+@(IsMandatory=false, SecondaryAssociation=true, IsShow=false, DisplayName="Port Channel Member Interfaces", IsInstance=true, Description="Auto generated on template with port-channel id. Example: if port-channel id is 2, interface member is eth1/2.")
+interfaceRange MEMBER_INTERFACES;
+
+@(DisplayName="Port Channel Mode", Description="Channel mode options: on, active and passive")
+enum PC_MODE {
+validValues=on,active,passive;
+defaultValue=active;
+};
+
+@(DisplayName="Enable BPDU Guard", Description="Enable spanning-tree bpduguard: true='enable', false='disable', no='return to default settings'")
+enum BPDUGUARD_ENABLED {
+validValues=true,false,no;
+defaultValue=true;
+};
+
+@(DisplayName="Enable Port Type Fast", Description="Enable spanning-tree edge port behavior")
+boolean PORTTYPE_FAST_ENABLED {
+defaultValue=true;
+};
+
+@(DisplayName="MTU", IsMTU=true, Description="MTU for the Port Channel")
+enum MTU {
+validValues=default,jumbo;
+defaultValue=jumbo;
+};
+
+@(IsMandatory=false, DisplayName="SPEED", Description="Port Channel Speed")
+enum SPEED {
+validValues=Auto,10Mb,100Mb,1Gb,2.5Gb,5Gb,10Gb,25Gb,40Gb,50Gb,100Gb,200Gb,400Gb;
+defaultValue=Auto;
+};
+
+@(DisplayName="Trunk Allowed Vlans", IsShow=false, Description="Auto generated on template. Could only be edited on template.")
+string ALLOWED_VLANS {
+defaultValue=none;
+};
+
+@(IsMandatory=false, DisplayName="Port Channel Description", IsInstance=true, Description="Add description to the port-channel (Max Size 254)")
+string DESC {
+  minLength = 1;
+  maxLength = 254;
+};
+
+@(IsMandatory=false, IsShow=false, IsMultiLineString=true, DisplayName="Freeform Config", IsInstance=true, Description="Auto generated on template. Could only be edited on template.")
+string CONF;
+
+@(DisplayName="Enable Port Channel", Description="Uncheck to disable the port-channel")
+boolean ADMIN_STATE {
+defaultValue=true;
+};
+
+@(IsMandatory=false, IsInternal=true)
+boolean PTP {
+defaultValue=false;
+};
+
+@(IsMandatory=false, DisplayName="Enable Netflow", Description="Netflow is supported only if it is enabled on fabric")
+boolean ENABLE_NETFLOW {
+defaultValue = false;
+};
+
+@(IsMandatory="ENABLE_NETFLOW==true", IsShow="ENABLE_NETFLOW==true",DisplayName="Netflow Monitor", Description="Provide the Layer 2 Monitor Name")
+string NETFLOW_MONITOR;
+
+##
+##template content
+
+from com.cisco.dcbu.vinci.rest.services.jython import PTIWrapper as PTI
+from com.cisco.dcbu.vinci.rest.services.jython import Wrapper
+from com.cisco.dcbu.vinci.rest.services.jython import WrappersResp
+from utility import *
+
+
+# Don't change before that
+# You can change interface range or conf
+if re.search('Port-channel([1-9]|1[0-9]|2[0-2])$', PO_ID):
+  ALLOWED_VLANS = "50-55,60-65"
+  CONF ="  switchport trunk native vlan 45\r  storm-control broadcast level 0.05\r  storm-control action shutdown\r  no lacp suspend-individual\r"
+elif re.search('Port-channel(2[8-9]|3[0-9])$', PO_ID):
+  ALLOWED_VLANS = "70-73"
+  CONF ="  switchport trunk native vlan 67\r  storm-control broadcast level 0.05\r  storm-control action shutdown\r  no lacp suspend-individual\r"
+# Degisiklik burada bitiyor.
+
+
+
+# Port channel id'si ile freeform text'e vpc config'ini asagidaki satirlar ekliyor. Burada degisiklik yapmayin.
+vpc_id = PO_ID.split("Port-channel")[1]
+CONF = CONF + "  vpc " + vpc_id + "\r"
+# Degisiklik burada bitiyor.
+
+# Port channel id'si ile interface memberlarini olusturuyor. Burada degisiklik yapmayin.
+interface_id = PO_ID.split("Port-channel")[1]
+MEMBER_INTERFACES = "eth1/" + interface_id
+# Degisiklik burada bitiyor.
+
+
+
+def add():
+    try:
+        portChannelIntf = PO_ID.lower()   
+        pc, pcid = portChannelIntf.split("port-channel")
+
+        respObj = Util.validateTrunkAllowedVlans(SERIAL_NUMBER, portChannelIntf, ALLOWED_VLANS)
+        if respObj.isRetCodeFailure():
+            return respObj
+
+        if CONF != "":
+            respObj, conf = Util.adjustIntfFreeformConfig(SERIAL_NUMBER, portChannelIntf, CONF)
+            if respObj.isRetCodeFailure():
+                return respObj
+
+        try:
+            speed = SPEED if SPEED != "" else "Auto"
+            if speed != "Auto":
+                dict = {}
+                dict["SERIAL_NUMBER"] = SERIAL_NUMBER
+                dict["SPEED"] = speed
+                dict["INTF"] = ""
+                respObj = PTIWrapper.executePyTemplateMethod("interface_utility", dict, "isPortSpeedSupported")
+                if respObj.isRetCodeFailure():
+                    return respObj
+        except:
+            speed = "Auto"
+
+        dict = {}
+        dict["PEER1_MEMBER_INTERFACES"] = MEMBER_INTERFACES
+        dict["PEER1_SERIAL_NUMBER"] = SERIAL_NUMBER
+        dict["PEER2_MEMBER_INTERFACES"] = ""
+        dict["PEER2_SERIAL_NUMBER"] = ""
+        dict["MEMBER_SOURCE"] = portChannelIntf
+        dict["TEMPLATE_NAME"] = "int_port_channel_trunk_host"
+        respObj = PTIWrapper.executePyTemplateMethod("interface_utility", dict, "validatePortChannelMembers")
+        if respObj.isRetCodeFailure():
+            return respObj
+
+        membersFromPTI = ""
+        ptiList = Util.exe(PTIWrapper.getPTIs(SERIAL_NUMBER, "INTERFACE", portChannelIntf, "PYTHON"))
+        for pti in ptiList:
+            membersFromPTI = pti.getNvPairs().get("MEMBER_INTERFACES", "")
+            break
+
+        if CONF != "":
+            respObj = Util.checkMemberDeleteFFConfig(SERIAL_NUMBER, portChannelIntf, CONF,
+                                                     membersFromPTI, MEMBER_INTERFACES)
+            if respObj.isRetCodeFailure():
+                return respObj
+
+        configNetflow = False
+        try:
+            if ENABLE_NETFLOW == "true":
+                FABRIC_NAME = Util.exe(InventoryWrapper.getFabricNameForSwitch(SERIAL_NUMBER))
+                dict = {"DEVICE_SN": SERIAL_NUMBER,
+                        "FABRIC_NAME": FABRIC_NAME,
+                        "IS_LAYER2": "true"}
+                respObj = PTIWrapper.executePyTemplateMethod("fabric_utility_11_1", dict, "allowNetflowConfig")
+                if respObj.isRetCodeFailure():
+                    return respObj
+
+                configNetflow = True
+        except:
+            pass
+
+        mtu = Util.getHostIntfMtu(SERIAL_NUMBER, MTU)
+        memberInterfaces = None
+        isFexMemIntf = False
+        if MEMBER_INTERFACES != "":
+            memberInterfaceList = Util.expand_interface_range(MEMBER_INTERFACES)
+            memberInterfaces = memberInterfaceList.split(",")
+            for interface in memberInterfaces:
+                if Util.isFexHIF(interface):
+                    isFexMemIntf = True
+                    break
+
+        memberDescDict = {}
+        memberConfDict = {}
+        memberAdminStateDict = {}
+        if memberInterfaces != None:
+            for interface in memberInterfaces:
+                ptiList = Util.exe(PTIWrapper.getPTIs(SERIAL_NUMBER, "INTERFACE", interface, "PYTHON"))
+                for pti in ptiList:
+                    templateName = pti.getTemplateName()
+                    if templateName == "int_port_channel_trunk_member_11_1":
+                        memberDescDict[interface] = pti.getNvPairs()["DESC"]
+                        memberConfDict[interface] = pti.getNvPairs()["CONF"]
+                        memberAdminStateDict[interface] = pti.getNvPairs()["ADMIN_STATE"]
+                        break
+                    if (templateName == "int_access_host" or 
+                        templateName == "int_dot1q_tunnel_host" or
+                        templateName == "int_routed_host" or
+                        templateName == "int_trunk_host"):
+                        memberDescDict[interface] = pti.getNvPairs()["DESC"]
+                        memberAdminStateDict[interface] = pti.getNvPairs()["ADMIN_STATE"]
+                        break
+
+        # modify to be done, calling delete now to clean up PTIs before add
+        delete(True)
+
+        Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                           portChannelIntf, portChannelIntf,
+                                           ConfigPriority.CONFIG_PRIO_HOST_INTF_PO,
+                                           "port_channel_trunk_interface_11_1",
+                                           {"INTF_NAME": portChannelIntf,
+                                            "ALLOWED_VLANS": ALLOWED_VLANS}))
+
+        if mtu != DEFAULT_MTU and not isFexMemIntf:
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "interface_mtu",
+                                               {"INTF_NAME": portChannelIntf,
+                                                "MTU": mtu}))
+
+        speedStr = Util.mapEnumToSwitchSpeed(speed)
+        if speedStr != SPEED_STR_SWITCH_DEFAULT:
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "interface_speed",
+                                               {"INTF_NAME": portChannelIntf, "SPEED": speedStr}))
+
+        dict = {}
+        dict["SERIAL_NUMBER"] = SERIAL_NUMBER
+        dict["SPEED"] = speed
+        respObj = PTIWrapper.executePyTemplateMethod("interface_utility", dict, "getPortSpeedAutoNeg")
+        autoNeg = respObj.getValue()
+
+        if autoNeg == "off":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL2,
+                                               "interface_no_nego_auto",
+                                               {"INTF_NAME": portChannelIntf}))
+
+        if BPDUGUARD_ENABLED == "true":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "bpduguard_enable",
+                                               {"INTF_NAME": portChannelIntf}))
+        elif BPDUGUARD_ENABLED == "false":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "bpduguard_disable",
+                                               {"INTF_NAME": portChannelIntf}))
+
+        if PORTTYPE_FAST_ENABLED == "true":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "porttype_fast_trunk",
+                                               {"INTF_NAME": portChannelIntf}))
+
+        if DESC != "":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL1,
+                                               "interface_desc",
+                                               {"INTF_NAME": portChannelIntf, "DESC" : DESC}))
+
+        if CONF != "":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL2,
+                                               "int_eth",
+                                               {"INTF_NAME": portChannelIntf, "CONF": conf}))
+
+        if ADMIN_STATE == "true":
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL3,
+                                               "no_shut_interface",
+                                               {"INTF_NAME": portChannelIntf}))
+        else:
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_PO_SUB_LVL3,
+                                               "shut_interface",
+                                               {"INTF_NAME": portChannelIntf}))
+
+        if memberInterfaces != None:
+            inheritedConf = ""
+            inheritedCmds = []
+            if CONF != "":
+                dict = {}
+                dict["CONF"] = conf
+                inheritedCmds = Util.exe(PTIWrapper.executePyTemplateMethod("interface_utility", dict,
+                                                                            "findInheritedCommandsInPOFF"))
+            if mtu != DEFAULT_MTU and not isFexMemIntf:
+                inheritedCmds.append("  mtu %s" % mtu)
+            if speedStr != SPEED_STR_SWITCH_DEFAULT:
+                inheritedCmds.append("  speed %s" % speedStr)
+            if autoNeg == "off":
+                inheritedCmds.append("  no negotiate auto")
+            if len(inheritedCmds) > 0:
+                inheritedConf = Util.newLine().join(inheritedCmds)
+
+            for interface in memberInterfaces:
+                memberDesc = memberDescDict.get(interface, "")
+                memberConf = memberConfDict.get(interface, "")
+                memberAdminState = memberAdminStateDict.get(interface, "true")
+                ttag = "true" if Util.isTTagCapable(SERIAL_NUMBER, interface) else "false"
+                ptp = "true" if Util.isPTPCapable(SERIAL_NUMBER, interface) else "false"
+                Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                                   interface, portChannelIntf,
+                                                   ConfigPriority.CONFIG_PRIO_HOST_INTF,
+                                                   "int_port_channel_trunk_member_11_1",
+                                                   {"INTF_NAME": interface,
+                                                    "PO_ID": PO_ID,
+                                                    "PC_MODE": PC_MODE,
+                                                    "ALLOWED_VLANS": ALLOWED_VLANS,
+                                                    "DESC": memberDesc,
+                                                    "CONF": memberConf,
+                                                    "ADMIN_STATE": memberAdminState,
+                                                    "PTP":ttag,
+                                                    "INTF_PTP":ptp}))
+                if inheritedConf != "":
+                    Util.exe(PTIWrapper.create(SERIAL_NUMBER, "INTERFACE",
+                                               interface, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_SUB_LVL2,
+                                               "int_eth",
+                                               {"INTF_NAME": interface, "CONF": inheritedConf},
+                                               "Inherited Commands"))
+
+        if configNetflow:
+            Util.exe(PTIWrapper.createOrUpdate(SERIAL_NUMBER, "INTERFACE",
+                                               portChannelIntf, portChannelIntf,
+                                               ConfigPriority.CONFIG_PRIO_HOST_INTF_SUB_LVL2,
+                                               "interface_l2_netflow",
+                                               {"INTF_NAME": portChannelIntf, "NETFLOW_MONITOR_NAME": NETFLOW_MONITOR}))
+
+        respObj = WrappersResp.getRespObj()
+        respObj.setSuccessRetCode()
+        return respObj
+    except respObjError as e:
+        return e.value
+
+def delete(Modify=False):
+    try:
+        portChannelIntf = PO_ID.lower()   
+        if not Modify and CONF != "":
+            respObj = Util.checkPODeleteFFConfig(SERIAL_NUMBER, portChannelIntf, CONF)
+            if respObj.isRetCodeFailure():
+                return respObj
+
+        ptiList = Util.exe(PTIWrapper.get(SERIAL_NUMBER, portChannelIntf))
+        if ptiList:
+            Util.exe(PTIWrapper.delete(SERIAL_NUMBER, portChannelIntf))
+
+        respObj = WrappersResp.getRespObj()
+        respObj.setSuccessRetCode()
+        return respObj
+    except respObjError as e:
+        return e.value
+##
